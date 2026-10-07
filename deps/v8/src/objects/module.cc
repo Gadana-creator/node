@@ -384,12 +384,21 @@ DirectHandle<JSModuleNamespace> Module::GetModuleNamespace(
   DirectHandle<ObjectHashTable> exports(module->exports(), isolate);
   ZoneVector<IndirectHandle<String>> names(&zone);
   names.reserve(exports->NumberOfElements());
+  [[maybe_unused]] bool skipped_then = false;
   for (InternalIndex i : exports->IterateEntries()) {
     Tagged<Object> key;
     if (!exports->ToKey(roots, i, &key)) continue;
+    // https://tc39.es/proposal-defer-import-eval/#sec-getmodulenamespace
+    // Deferred namespaces never expose a "then" export, so that awaiting
+    // import.defer() resolves to the namespace itself.
+    if (phase == ModuleImportPhase::kDefer && key == roots.then_string()) {
+      skipped_then = true;
+      continue;
+    }
     names.push_back(handle(Cast<String>(key), isolate));
   }
-  DCHECK_EQ(static_cast<int>(names.size()), exports->NumberOfElements());
+  DCHECK_EQ(static_cast<int>(names.size()),
+            exports->NumberOfElements() - (skipped_then ? 1 : 0));
 
   // Sort them alphabetically.
   std::sort(names.begin(), names.end(),
@@ -457,7 +466,7 @@ MaybeDirectHandle<Object> JSModuleNamespace::GetExport(
   }
 
   DirectHandle<Object> value(Cast<Cell>(*object)->value(), isolate);
-  if (IsTheHole(*value)) {
+  if (IsTdzHole(*value)) {
     // According to https://tc39.es/ecma262/#sec-InnerModuleLinking
     // step 10 and
     // https://tc39.es/ecma262/#sec-source-text-module-record-initialize-environment
@@ -511,7 +520,7 @@ Maybe<PropertyAttributes> JSModuleNamespace::GetPropertyAttributes(
   if (IsTheHole(*lookup)) return Just(ABSENT);
 
   DirectHandle<Object> value(Cast<Cell>(lookup)->value(), isolate);
-  if (IsTheHole(*value)) {
+  if (IsTdzHole(*value)) {
     isolate->Throw(*isolate->factory()->NewReferenceError(
         MessageTemplate::kNotDefined, name));
     return Nothing<PropertyAttributes>();

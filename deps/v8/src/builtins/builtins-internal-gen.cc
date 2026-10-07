@@ -89,8 +89,11 @@ TF_BUILTIN(DebugBreakTrampoline, CodeStubAssembler) {
 #ifdef V8_JS_LINKAGE_INCLUDES_DISPATCH_HANDLE
   auto dispatch_handle =
       UncheckedParameter<JSDispatchHandleT>(Descriptor::kJSDispatchHandle);
+  TNode<Uint16T> expected_parameter_count =
+      LoadParameterCountFromJSDispatchTable(dispatch_handle);
 #else
   auto dispatch_handle = InvalidDispatchHandleConstant();
+  TNode<Uint16T> expected_parameter_count = Uint16Constant(0);
 #endif
   auto function = Parameter<JSFunction>(Descriptor::kJSTarget);
 
@@ -116,7 +119,8 @@ TF_BUILTIN(DebugBreakTrampoline, CodeStubAssembler) {
   TailCallJSCode(
       TrustedCast<Code>(
           code, "used in a call which will be checked via dispatch table"),
-      context, function, new_target, arg_count, dispatch_handle);
+      context, function, new_target, arg_count, dispatch_handle,
+      expected_parameter_count);
 }
 
 class WriteBarrierCodeStubAssembler : public CodeStubAssembler {
@@ -861,9 +865,15 @@ class TSANRelaxedLoadCodeStubAssembler : public CodeStubAssembler {
   void GenerateTSANRelaxedLoad(SaveFPRegsMode fp_mode, int size) {
     TNode<ExternalReference> function = GetExternalReference(size);
     auto address = UncheckedParameter<IntPtrT>(TSANLoadDescriptor::kAddress);
+    auto shared_base =
+        UncheckedParameter<Object>(TSANLoadDescriptor::kSharedBase);
+    auto invoke_tsan_acquire =
+        UncheckedParameter<Int32T>(TSANLoadDescriptor::kInvokeTsanAcquire);
     CallCFunctionWithCallerSavedRegisters(
         function, MachineType::Int32(), fp_mode,
-        std::make_pair(MachineType::IntPtr(), address));
+        std::make_pair(MachineType::IntPtr(), address),
+        std::make_pair(MachineType::AnyTagged(), shared_base),
+        std::make_pair(MachineType::Int32(), invoke_tsan_acquire));
     Return(UndefinedConstant());
   }
 };

@@ -1653,6 +1653,9 @@ MaybeDirectHandle<Object> ValueDeserializer::ReadObjectWrapper() {
   if (result.is_null() && version_ == 13 && !isolate_->has_exception()) {
     version_13_broken_data_mode_ = true;
     position_ = original_position;
+    // Reset the ID map to avoid referencing incomplete or stale objects from
+    // the failed first pass.
+    ResetIdMap();
     result = ReadObject();
   }
 
@@ -1875,7 +1878,7 @@ MaybeDirectHandle<String> ValueDeserializer::ReadTwoByteString(
   // Copy the bytes directly into the new string.
   // Warning: this uses host endianness.
   DisallowGarbageCollection no_gc;
-  memcpy(string->GetChars(no_gc), bytes.begin(), bytes.length());
+  memcpy(string->GetChars(no_gc), bytes.begin(), bytes.size());
   return string;
 }
 
@@ -2199,10 +2202,13 @@ MaybeDirectHandle<JSArrayBuffer> ValueDeserializer::ReadJSArrayBuffer(
         DirectHandle<Object> wasm_memory_obj;
         if (!ReadObject().ToHandle(&wasm_memory_obj)) return {};
         if (!IsWasmMemoryObject(*wasm_memory_obj)) return {};
-        // If the WasmMemoryObject was deserialized just now, it will have set
-        // up the link from the ArrayBuffer already. If it was reused
-        // (deserialized earlier), then we need to establish a link from this
-        // second AB.
+        // If this ArrayBuffer is the WasmMemoryObject's primary buffer,
+        // WasmMemoryObject::SetNewBuffer will also fix it up and set the link.
+        // If it is not the primary buffer (e.g. displaced by
+        // toFixedLengthBuffer()), we must fix up max_byte_length and establish
+        // the link to the WasmMemoryObject here.
+        Cast<WasmMemoryObject>(*wasm_memory_obj)
+            ->FixUpResizableArrayBuffer(*array_buffer);
         Object::SetProperty(
             isolate_, array_buffer,
             isolate_->factory()->array_buffer_wasm_memory_symbol(),
@@ -2600,6 +2606,8 @@ MaybeDirectHandle<HeapObject> ValueDeserializer::ReadSharedObject() {
   STACK_CHECK(isolate_, MaybeDirectHandle<HeapObject>());
   DCHECK_GE(version_, 15);
 
+  uint32_t id = next_id_++;
+
   uint32_t shared_object_id;
   if (!ReadVarint<uint32_t>().To(&shared_object_id)) {
     RETURN_EXCEPTION_IF_EXCEPTION(isolate_);
@@ -2624,6 +2632,7 @@ MaybeDirectHandle<HeapObject> ValueDeserializer::ReadSharedObject() {
   DirectHandle<HeapObject> shared_object(
       shared_object_conveyor_->GetPersisted(shared_object_id), isolate_);
   DCHECK(IsShared(*shared_object));
+  AddObjectWithID(id, Cast<JSReceiver>(shared_object));
   return shared_object;
 }
 
@@ -2866,6 +2875,13 @@ void ValueDeserializer::AddObjectWithID(uint32_t id,
     GlobalHandles::Destroy(id_map_.location());
     id_map_ = isolate_->global_handles()->Create(*new_array);
   }
+}
+
+void ValueDeserializer::ResetIdMap() {
+  GlobalHandles::Destroy(id_map_.location());
+  id_map_ = isolate_->global_handles()->Create(
+      ReadOnlyRoots(isolate_).empty_fixed_array());
+  next_id_ = 0;
 }
 
 static Maybe<bool> SetPropertiesFromKeyValuePairs(Isolate* isolate,

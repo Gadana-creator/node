@@ -23,6 +23,7 @@
 #include "src/execution/local-isolate.h"
 #include "src/handles/global-handles.h"
 #include "src/heap/factory.h"
+#include "src/init/v8.h"
 #include "src/objects/js-collator-inl.h"
 #include "src/objects/js-date-time-format-inl.h"
 #include "src/objects/js-locale-inl.h"
@@ -261,7 +262,9 @@ void IcuBreakIteratorWithText::SetText(Isolate* isolate,
                                        DirectHandle<String> string) {
   string = String::Flatten(isolate, string);
   text_.reset(Intl::ToICUUnicodeString(isolate, string).clone());
-  DCHECK_NOT_NULL(text_);
+  if (V8_UNLIKELY(text_ == nullptr)) {
+    V8::FatalProcessOutOfMemory(isolate, "IcuBreakIteratorWithText::SetText");
+  }
   iterator_->setText(*text_);
 }
 
@@ -1087,8 +1090,7 @@ std::optional<int> Intl::StringLocaleCompare(Isolate* isolate,
   MaybeDirectHandle<JSCollator> maybe_collator =
       New<JSCollator>(isolate, constructor, locales, options, method_name);
   if (!maybe_collator.ToHandle(&collator)) return {};
-  CppGCManaged<icu::Collator>::Ptr icu_collator =
-      collator->icu_collator()->ptr();
+  Managed<icu::Collator>::Ptr icu_collator = collator->icu_collator()->ptr();
   if (can_cache) {
     isolate->set_icu_object_in_cache(
         Isolate::ICUObjectCacheType::kDefaultCollator, locales,
@@ -1607,7 +1609,7 @@ MaybeDirectHandle<String> Intl::NumberToLocaleString(
       isolate, number_format,
       New<JSNumberFormat>(isolate, constructor, locales, options, method_name));
 
-  CppGCManaged<icu::number::LocalizedNumberFormatter>::Ptr lfmt =
+  Managed<icu::number::LocalizedNumberFormatter>::Ptr lfmt =
       number_format->icu_number_formatter()->ptr();
 
   if (can_cache) {

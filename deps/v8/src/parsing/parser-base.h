@@ -30,7 +30,6 @@
 #include "src/parsing/scanner.h"
 #include "src/parsing/token.h"
 #include "src/regexp/regexp.h"
-#include "src/zone/zone-chunk-list.h"
 
 namespace v8::internal {
 
@@ -254,7 +253,6 @@ class ParserBase {
       : scope_(nullptr),
         original_scope_(nullptr),
         function_state_(nullptr),
-        has_generator_in_scope_chain_(false),
         fni_(ast_value_factory),
         ast_value_factory_(ast_value_factory),
         ast_node_factory_(ast_value_factory, zone),
@@ -279,13 +277,6 @@ class ParserBase {
 
   const UnoptimizedCompileFlags& flags() const { return flags_; }
   bool has_module_in_scope_chain() const { return has_module_in_scope_chain_; }
-
-  bool has_generator_in_scope_chain() const {
-    return has_generator_in_scope_chain_;
-  }
-  void set_has_generator_in_scope_chain(bool has_generator) {
-    has_generator_in_scope_chain_ = has_generator;
-  }
 
   // DebugEvaluate code
   bool IsParsingWhileDebugging() const {
@@ -458,7 +449,7 @@ class ParserBase {
   class FunctionState final : public BlockState {
    public:
     FunctionState(FunctionState** function_state_stack, Scope** scope_stack,
-                  DeclarationScope* scope, bool* has_generator_in_scope_chain);
+                  DeclarationScope* scope);
     ~FunctionState();
 
     DeclarationScope* scope() const { return scope_->AsDeclarationScope(); }
@@ -557,9 +548,6 @@ class ParserBase {
 
     // Track if a function or eval occurs within this FunctionState
     bool contains_function_or_eval_;
-
-    bool* has_generator_in_scope_chain_ptr_;
-    bool previous_has_generator_in_scope_chain_;
 
     friend Impl;
   };
@@ -1763,7 +1751,6 @@ class ParserBase {
   Scope* object_literal_scope_ = nullptr;
   Scope* original_scope_;  // The top scope for the current parsing item.
   FunctionState* function_state_;  // Function state stack.
-  bool has_generator_in_scope_chain_;
   FuncNameInferrer fni_;
   AstValueFactory* ast_value_factory_;  // Not owned.
   typename Types::Factory ast_node_factory_;
@@ -1845,7 +1832,7 @@ class ParserBase {
 template <typename Impl>
 ParserBase<Impl>::FunctionState::FunctionState(
     FunctionState** function_state_stack, Scope** scope_stack,
-    DeclarationScope* scope, bool* has_generator_in_scope_chain)
+    DeclarationScope* scope)
     : BlockState(scope_stack, scope),
       expected_property_count_(0),
       suspend_count_(0),
@@ -1855,23 +1842,18 @@ ParserBase<Impl>::FunctionState::FunctionState(
       dont_optimize_reason_(BailoutReason::kNoReason),
       next_function_is_likely_called_(false),
       previous_function_was_likely_called_(false),
-      contains_function_or_eval_(false),
-      has_generator_in_scope_chain_ptr_(has_generator_in_scope_chain),
-      previous_has_generator_in_scope_chain_(*has_generator_in_scope_chain) {
+      contains_function_or_eval_(false) {
   *function_state_stack = this;
   if (outer_function_state_) {
     outer_function_state_->previous_function_was_likely_called_ =
         outer_function_state_->next_function_is_likely_called_;
     outer_function_state_->next_function_is_likely_called_ = false;
   }
-  *has_generator_in_scope_chain_ptr_ =
-      previous_has_generator_in_scope_chain_ || IsGeneratorFunction(kind());
 }
 
 template <typename Impl>
 ParserBase<Impl>::FunctionState::~FunctionState() {
   *function_state_stack_ = outer_function_state_;
-  *has_generator_in_scope_chain_ptr_ = previous_has_generator_in_scope_chain_;
 }
 
 template <typename Impl>
@@ -2522,13 +2504,11 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseProperty(
   if (prop_info->kind == ParsePropertyKind::kNotSet &&
       base::IsInRange(peek(), Token::kGet, Token::kSet)) {
     Token::Value token = Next();
-    if (prop_info->ParsePropertyKindFromToken(peek())) {
+    if (prop_info->ParsePropertyKindFromToken(peek()) ||
+        V8_UNLIKELY(scanner()->literal_contains_escapes())) {
       prop_info->name = impl()->GetIdentifier();
       impl()->PushLiteralName(prop_info->name);
       return factory()->NewStringLiteral(prop_info->name, position());
-    }
-    if (V8_UNLIKELY(scanner()->literal_contains_escapes())) {
-      impl()->ReportUnexpectedToken(Token::kEscapedKeyword);
     }
     if (token == Token::kGet) {
       prop_info->kind = ParsePropertyKind::kAccessorGetter;
@@ -2906,8 +2886,7 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseMemberInitializer(
 
   if (Check(Token::kAssign)) {
     FunctionState initializer_state(&function_state_, &scope_,
-                                    initializer_scope,
-                                    &has_generator_in_scope_chain_);
+                                    initializer_scope);
 
     AcceptINScope scope(this, true);
     auto result = ParseAssignmentExpression();
@@ -2926,8 +2905,7 @@ typename ParserBase<Impl>::BlockT ParserBase<Impl>::ParseClassStaticBlock(
   DeclarationScope* initializer_scope =
       class_info->EnsureStaticElementsScope(this, position(), PeekNextInfoId());
 
-  FunctionState initializer_state(&function_state_, &scope_, initializer_scope,
-                                  &has_generator_in_scope_chain_);
+  FunctionState initializer_state(&function_state_, &scope_, initializer_scope);
   FunctionParsingScope body_parsing_scope(impl());
   AcceptINScope accept_in(this, true);
 
@@ -3227,6 +3205,8 @@ void ParserBase<Impl>::ParseArguments(
               scanner()->peek_location(), MessageTemplate::kParamAfterRest);
         }
       }
+    } else {
+      accumulation_scope.ValidateExpression();
     }
     if (is_spread) {
       *has_spread = true;
@@ -3483,7 +3463,7 @@ ParserBase<Impl>::ParseYieldExpression() {
         // Delegating yields require an RHS; fall through.
         [[fallthrough]];
       default:
-        expression = ParseAssignmentExpressionCoverGrammar();
+        expression = ParseAssignmentExpression();
         break;
     }
   }
@@ -4282,7 +4262,7 @@ ParserBase<Impl>::ParseImportExpressions() {
   }
 
   AcceptINScope scope(this, true);
-  ExpressionT specifier = ParseAssignmentExpressionCoverGrammar();
+  ExpressionT specifier = ParseAssignmentExpression();
 
   DCHECK_IMPLIES(phase == ModuleImportPhase::kSource,
                  v8_flags.js_source_phase_imports);
@@ -4294,7 +4274,7 @@ ParserBase<Impl>::ParseImportExpressions() {
       // A trailing comma allowed after the specifier.
       return factory()->NewImportCallExpression(specifier, phase, pos);
     } else {
-      ExpressionT import_options = ParseAssignmentExpressionCoverGrammar();
+      ExpressionT import_options = ParseAssignmentExpression();
       Check(Token::kComma);  // A trailing comma is allowed after the import
                              // attributes.
       Expect(Token::kRightParen);
@@ -5147,8 +5127,7 @@ ParserBase<Impl>::ParseArrowFunctionLiteral(
   StatementListT body(pointer_buffer());
   {
     FunctionState function_state(&function_state_, &scope_,
-                                 formal_parameters.scope,
-                                 &has_generator_in_scope_chain_);
+                                 formal_parameters.scope);
 
     Consume(Token::kArrow);
 
@@ -5195,12 +5174,16 @@ ParserBase<Impl>::ParseArrowFunctionLiteral(
           if (has_error()) return impl()->FailureExpression();
 
           DeclarationScope* function_scope = next_arrow_function_info_.scope;
+          function_scope->set_start_position(
+              formal_parameters.scope->start_position());
           FunctionState inner_function_state(&function_state_, &scope_,
-                                             function_scope,
-                                             &has_generator_in_scope_chain_);
+                                             function_scope);
           Scanner::Location loc(function_scope->start_position(),
                                 end_position());
           FormalParametersT parameters(function_scope);
+          parameters.set_strict_parameter_error(
+              next_arrow_function_info_.strict_parameter_error_location,
+              next_arrow_function_info_.strict_parameter_error_message);
           parameters.is_simple = function_scope->has_simple_parameters();
           impl()->DeclareArrowFunctionFormalParameters(&parameters, expression,
                                                        loc);
@@ -5369,6 +5352,10 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseClassLiteral(
     if (should_save_class_variable) {
       class_scope->class_variable()->set_is_used();
       class_scope->class_variable()->ForceContextAllocation();
+      // Static brand checks elide the hole check and can observe `the_hole`
+      // before the class is initialized. Mark as assigned so `the_hole` is not
+      // propagated across initialization.
+      class_scope->class_variable()->set_maybe_assigned();
     }
   }
 
@@ -6463,7 +6450,7 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseSwitchStatement(
 
   {
     BlockState cases_block_state(zone(), &scope_);
-    scope()->set_start_position(switch_pos);
+    scope()->set_start_position(peek_position());
     scope()->SetNonlinear();
     Target target(this, switch_statement, labels, nullptr,
                   Target::TARGET_FOR_ANONYMOUS);
@@ -6534,16 +6521,7 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseTryStatement() {
   Consume(Token::kTry);
   int pos = position();
 
-  std::optional<typename Scope::Snapshot> try_catch_snapshot;
-  if (has_generator_in_scope_chain()) {
-    try_catch_snapshot.emplace(scope());
-  }
-
   BlockT try_block = ParseBlock(nullptr);
-
-  if (try_catch_snapshot.has_value()) {
-    try_catch_snapshot->MarkUnresolvedVariablesAsInsideTryCatch();
-  }
 
   CatchInfo catch_info(this);
 
@@ -6648,7 +6626,6 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseTryStatement() {
   }
 
   RETURN_IF_PARSE_ERROR;
-
   return impl()->RewriteTryStatement(try_block, catch_block, catch_range,
                                      finally_block, finally_range, catch_info,
                                      pos);

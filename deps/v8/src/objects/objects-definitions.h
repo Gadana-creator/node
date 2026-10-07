@@ -215,7 +215,8 @@ namespace internal {
 #define ALLOCATION_SITE_MAPS_LIST_ADAPTER(V, TYPE, Name, Size, name_size) \
   V(Map, name_size##_map, Name##Size##Map)
 
-// Produces (Map, allocation_site_name_map, AllocationSiteNameMap) entries
+// Produces (Map, allocation_site_name_map, AllocationSiteNameMap)
+// entries
 #define ALLOCATION_SITE_MAPS_LIST(V) \
   ALLOCATION_SITE_LIST(ALLOCATION_SITE_MAPS_LIST_ADAPTER, V)
 

@@ -2814,7 +2814,13 @@ void SharedFunctionInfo::SharedFunctionInfoPrint(std::ostream& os) {
   os << "\n - untrusted_function_data: " << Brief(GetUntrustedData());
   os << "\n - code (from function_data): ";
   Isolate* isolate;
-  if (GetIsolateFromHeapObject(Tagged<SharedFunctionInfo>(this), &isolate)) {
+  if (GetIsolateFromHeapObject(Tagged<SharedFunctionInfo>(this), &isolate)
+#if V8_ENABLE_WEBASSEMBLY
+      // WasmFunctionData does not store a Code object; see
+      // SharedFunctionInfo::GetCode().
+      && !HasWasmFunctionData(isolate)
+#endif  // V8_ENABLE_WEBASSEMBLY
+  ) {
     os << Brief(GetCode(isolate));
   } else {
     os << kUnavailableString;
@@ -3316,7 +3322,7 @@ void WasmArray::WasmArrayPrint(std::ostream& os) {
   uint32_t len = length();
   os << "\n - element type: " << element_type.name();
   os << "\n - length: " << len;
-  Address data_ptr = ptr() + WasmArray::kHeaderSize - kHeapObjectTag;
+  Address data_ptr = ElementAddress(0);
   switch (element_type.kind()) {
     case wasm::kI32:
       PrintTypedArrayElements(os, reinterpret_cast<int32_t*>(data_ptr), len,
@@ -3464,7 +3470,7 @@ void WasmTrustedInstanceData::WasmTrustedInstanceDataPrint(std::ostream& os) {
   PRINT_WASM_INSTANCE_FIELD(feedback_vectors, Brief);
   PRINT_WASM_INSTANCE_FIELD(well_known_imports, Brief);
   PRINT_WASM_INSTANCE_FIELD(memory0_start, to_void_ptr);
-  PRINT_WASM_INSTANCE_FIELD(memory0_size, +);
+  PRINT_WASM_INSTANCE_FIELD(memory0_size_or_address, to_void_ptr);
 #if V8_ENABLE_DRUMBRAKE
   PRINT_WASM_INSTANCE_FIELD(imported_function_indices, Brief);
 #endif  // V8_ENABLE_DRUMBRAKE
@@ -3474,6 +3480,7 @@ void WasmTrustedInstanceData::WasmTrustedInstanceDataPrint(std::ostream& os) {
   PRINT_WASM_INSTANCE_FIELD(hook_on_function_call_address, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(tiering_budget_array, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(memory_bases_and_sizes, Brief);
+  PRINT_WASM_INSTANCE_FIELD(shared_memory_backing_stores, Brief);
   PRINT_WASM_INSTANCE_FIELD(break_on_entry, static_cast<int>);
   os << "\n";
 
@@ -3518,10 +3525,8 @@ void WasmDispatchTableForImports::WasmDispatchTableForImportsPrint(
 
 // Never called directly, as WasmFunctionData is an "abstract" class.
 void WasmFunctionData::WasmFunctionDataPrint(std::ostream& os) {
-  IsolateForSandbox isolate = GetCurrentIsolateForSandbox();
   os << "\n - func_ref: " << Brief(func_ref());
   os << "\n - internal: " << Brief(internal());
-  os << "\n - wrapper_code: " << Brief(wrapper_code(isolate));
   os << "\n - js_promise_flags: " << js_promise_flags();
   // No newline here; the caller prints it after printing additional fields.
 }
@@ -3558,9 +3563,6 @@ void WasmImportData::WasmImportDataPrint(std::ostream& os) {
   }
   os << "\n - suspend: " << static_cast<int>(suspend());
   os << "\n - wrapper_budget: " << wrapper_budget()->value();
-  if (has_call_origin()) {
-    os << "\n - call_origin: " << Brief(call_origin());
-  }
   os << "\n - sig: " << sig() << " (" << sig()->parameter_count() << " params, "
      << sig()->return_count() << " returns)";
   os << "\n";
@@ -3673,6 +3675,13 @@ void PrototypeSharedClosureInfo::PrototypeSharedClosureInfoPrint(
   os << "\n - closure_feedback_cell_array: "
      << Brief(closure_feedback_cell_array());
   os << "\n - context: " << Brief(context());
+  os << '\n';
+}
+
+void UninitializedHeapNumber::UninitializedHeapNumberPrint(std::ostream& os) {
+  PrintHeader(os, "UninitializedHeapNumber");
+  os << "\n - value: ";
+  PrintDouble(os, value());
   os << '\n';
 }
 
@@ -4202,10 +4211,8 @@ void ScopeInfo::ScopeInfoPrint(std::ostream& os) {
     os << "\n - has context extension slot";
   }
 
-  if (HasPositionInfo()) {
-    os << "\n - start position: " << StartPosition();
-    os << "\n - end position: " << EndPosition();
-  }
+  os << "\n - start position: " << StartPosition();
+  os << "\n - end position: " << EndPosition();
   os << "\n - length: " << length();
   if (length() > 0) {
     PrintScopeInfoList(this, os, "context slots", ContextLocalCount());
@@ -4554,6 +4561,10 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
          << ") preparsed=" << Brief(data->preparse_data()) << ">";
       break;
     }
+
+    case UNINITIALIZED_HEAP_NUMBER_TYPE:
+      os << "<UninitializedHeapNumber>";
+      break;
 
     case SHARED_FUNCTION_INFO_TYPE: {
       Tagged<SharedFunctionInfo> shared = Cast<SharedFunctionInfo>(this);

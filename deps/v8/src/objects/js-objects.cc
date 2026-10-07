@@ -197,7 +197,7 @@ Handle<Object> JSReceiver::GetDataProperty(LookupIterator* it,
         auto accessors = it->GetAccessors();
         // Special handling for AccessorInfo, which behaves like a data
         // property.
-        if (IsAccessorInfo(*accessors)) {
+        if (allow_allocation && IsAccessorInfo(*accessors)) {
           auto info = Cast<AccessorInfo>(*accessors);
           if (info->getter_side_effect_type() ==
               SideEffectType::kHasNoSideEffect) {
@@ -478,6 +478,9 @@ Maybe<bool> JSReceiver::SetOrCopyDataProperties(
     InstanceType target_instance_type = target->map()->instance_type();
     if (InstanceTypeChecker::IsJSObject(target_instance_type) &&
         !InstanceTypeChecker::IsJSGlobalProxy(target_instance_type) &&
+        // Exclude remote objects (they don't have local properties anyway).
+        !(InstanceTypeChecker::IsJSSpecialApiObject(target_instance_type) &&
+          !target->GetCreationContext().has_value()) &&
         !InstanceTypeChecker::IsAlwaysSharedSpaceJSObject(
             target_instance_type)) {
       // Convert to slow properties if we're guaranteed to overflow the number
@@ -3250,7 +3253,7 @@ void MigrateFastToFast(Isolate* isolate, DirectHandle<JSObject> object,
             object->property_array()->length().value()) {
       // Allocate HeapNumbers for double fields.
       if (index.is_double()) {
-        auto value = isolate->factory()->NewHeapNumberWithHoleNaN();
+        auto value = isolate->factory()->NewUninitializedHeapNumber();
         object->FastPropertyAtPut(index, *value);
       }
       object->set_map(isolate, *new_map, kReleaseStore);
@@ -3269,7 +3272,7 @@ void MigrateFastToFast(Isolate* isolate, DirectHandle<JSObject> object,
     // Properly initialize newly added property.
     DirectHandle<Object> value;
     if (details.representation().IsDouble()) {
-      value = isolate->factory()->NewHeapNumberWithHoleNaN();
+      value = isolate->factory()->NewUninitializedHeapNumber();
     } else {
       value = isolate->factory()->uninitialized_value();
     }
@@ -3330,14 +3333,14 @@ void MigrateFastToFast(Isolate* isolate, DirectHandle<JSObject> object,
     PropertyDetails old_details = old_descriptors->GetDetails(i);
     Representation old_representation = old_details.representation();
     Representation representation = details.representation();
-    Handle<UnionOf<JSAny, Hole>> value;
+    Handle<UnionOf<JSAny, Hole, UninitializedHeapNumber>> value;
     if (old_details.location() == PropertyLocation::kDescriptor) {
       if (old_details.kind() == PropertyKind::kAccessor) {
         // In case of kAccessor -> kData property reconfiguration, the property
         // must already be prepared for data of certain type.
         DCHECK(!details.representation().IsNone());
         if (details.representation().IsDouble()) {
-          value = isolate->factory()->NewHeapNumberWithHoleNaN();
+          value = isolate->factory()->NewUninitializedHeapNumber();
         } else {
           value = isolate->factory()->uninitialized_value();
         }
@@ -3356,8 +3359,12 @@ void MigrateFastToFast(Isolate* isolate, DirectHandle<JSObject> object,
                        IsUninitializedHole(*value));
         value = Object::NewStorageFor(isolate, value, representation);
       } else if (old_representation.IsDouble() && !representation.IsDouble()) {
-        value = Object::WrapForRead(isolate, Cast<JSAny>(value),
-                                    old_representation);
+        if (IsUninitializedHeapNumber(*value)) {
+          value = isolate->factory()->uninitialized_value();
+        } else {
+          value = Object::WrapForRead(isolate, Cast<JSAny>(value),
+                                      old_representation);
+        }
       }
     }
     DCHECK(!(representation.IsDouble() && IsSmi(*value)));
@@ -3378,7 +3385,7 @@ void MigrateFastToFast(Isolate* isolate, DirectHandle<JSObject> object,
     DCHECK_EQ(PropertyKind::kData, details.kind());
     DirectHandle<Object> value;
     if (details.representation().IsDouble()) {
-      value = isolate->factory()->NewHeapNumberWithHoleNaN();
+      value = isolate->factory()->NewUninitializedHeapNumber();
     } else {
       value = isolate->factory()->uninitialized_value();
     }
@@ -3468,9 +3475,16 @@ void MigrateFastToSlow(Isolate* isolate, DirectHandle<JSObject> object,
       if (details.kind() == PropertyKind::kData) {
         value = direct_handle(object->RawFastPropertyAt(index), isolate);
         if (details.representation().IsDouble()) {
-          DCHECK(IsHeapNumber(*value));
-          double old_value = Cast<HeapNumber>(value)->value();
-          value = isolate->factory()->NewHeapNumber(old_value);
+          if (IsUninitializedHeapNumber(*value)) {
+            // This might happen when we are migrating a half-initialized
+            // object literal in order to replace this property with an
+            // accessor pair.
+            value = isolate->factory()->uninitialized_value();
+          } else {
+            DCHECK(IsHeapNumber(*value));
+            double old_value = Cast<HeapNumber>(value)->value();
+            value = isolate->factory()->NewHeapNumber(old_value);
+          }
         }
       } else {
         DCHECK_EQ(PropertyKind::kAccessor, details.kind());
@@ -3662,7 +3676,8 @@ void JSObject::AllocateStorageForMap(Isolate* isolate,
     Representation representation = details.representation();
     if (!representation.IsDouble()) continue;
     FieldIndex index = FieldIndex::ForDetails(*map, details);
-    auto box = isolate->factory()->NewHeapNumberWithHoleNaN();
+    auto box = isolate->factory()->NewUninitializedHeapNumber();
+
     if (index.is_inobject()) {
       storage->set(index.property_index(), *box);
     } else {
@@ -5974,7 +5989,7 @@ Tagged<Object> JSDate::GetUTCField(FieldIndex index, double value,
   int64_t time_ms = static_cast<int64_t>(value);
 
   if (index == kTimezoneOffset) {
-    return Smi::FromInt(date_cache->TimezoneOffset(time_ms));
+    return Smi::FromInt(date_cache->TimezoneOffsetMs(time_ms));
   }
 
   int days = DateCache::DaysFromTime(time_ms);

@@ -5,10 +5,10 @@
 #include "src/baseline/baseline-compiler.h"
 
 #include <algorithm>
+#include <bit>
 #include <optional>
 #include <type_traits>
 
-#include "src/base/bits.h"
 #include "src/base/logging.h"
 #include "src/base/numerics/clamped_math.h"
 #include "src/base/strong-alias.h"
@@ -317,7 +317,7 @@ BaselineCompiler::BaselineCompiler(
   //
   //   16 + (bytecode size) / 4
   bytecode_offset_table_builder_.Reserve(
-      base::bits::RoundUpToPowerOfTwo(16 + bytecode_->Size() / 4));
+      std::bit_ceil<size_t>(16 + bytecode_->Size() / 4));
 }
 
 void BaselineCompiler::GenerateCode() {
@@ -836,6 +836,10 @@ void BaselineCompiler::VisitLdaTheHole() {
   __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kTheHoleValue);
 }
 
+void BaselineCompiler::VisitLdaTdzHole() {
+  __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kTdzHoleValue);
+}
+
 void BaselineCompiler::VisitLdaTrue() {
   __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kTrueValue);
 }
@@ -1205,6 +1209,10 @@ void BaselineCompiler::VisitDefineNamedOwnProperty() {
       Constant<Name>(1),                // name
       kInterpreterAccumulatorRegister,  // value
       FeedbackSlotAsTagged(2));         // slot
+}
+
+void BaselineCompiler::VisitDefineNamedOwnPropertyInLiteral() {
+  VisitDefineNamedOwnProperty();
 }
 
 void BaselineCompiler::VisitSetKeyedProperty() {
@@ -2820,9 +2828,9 @@ void BaselineCompiler::VisitReturn() {
                                                 -profiling_weight);
 }
 
-void BaselineCompiler::VisitThrowReferenceErrorIfHole() {
+void BaselineCompiler::VisitThrowReferenceErrorIfTdzHole() {
   Label done;
-  __ JumpIfNotRoot(kInterpreterAccumulatorRegister, RootIndex::kTheHoleValue,
+  __ JumpIfNotRoot(kInterpreterAccumulatorRegister, RootIndex::kTdzHoleValue,
                    &done);
   CallRuntime(Runtime::kThrowAccessedUninitializedVariable, Constant<Name>(0));
   // Unreachable.
@@ -2830,9 +2838,9 @@ void BaselineCompiler::VisitThrowReferenceErrorIfHole() {
   __ Bind(&done);
 }
 
-void BaselineCompiler::VisitThrowSuperNotCalledIfHole() {
+void BaselineCompiler::VisitThrowSuperNotCalledIfTdzHole() {
   Label done;
-  __ JumpIfNotRoot(kInterpreterAccumulatorRegister, RootIndex::kTheHoleValue,
+  __ JumpIfNotRoot(kInterpreterAccumulatorRegister, RootIndex::kTdzHoleValue,
                    &done);
   CallRuntime(Runtime::kThrowSuperNotCalled);
   // Unreachable.
@@ -2840,9 +2848,9 @@ void BaselineCompiler::VisitThrowSuperNotCalledIfHole() {
   __ Bind(&done);
 }
 
-void BaselineCompiler::VisitThrowSuperAlreadyCalledIfNotHole() {
+void BaselineCompiler::VisitThrowSuperAlreadyCalledIfNotTdzHole() {
   Label done;
-  __ JumpIfRoot(kInterpreterAccumulatorRegister, RootIndex::kTheHoleValue,
+  __ JumpIfRoot(kInterpreterAccumulatorRegister, RootIndex::kTdzHoleValue,
                 &done);
   CallRuntime(Runtime::kThrowSuperAlreadyCalledError);
   // Unreachable.

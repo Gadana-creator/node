@@ -1397,7 +1397,7 @@ template <typename Getter, typename Setter>
 i::DirectHandle<i::AccessorInfo> MakeAccessorInfo(i::Isolate* i_isolate,
                                                   v8::Local<Name> name,
                                                   Getter getter, Setter setter,
-                                                  v8::Local<Value> data,
+                                                  v8::Local<Data> data,
                                                   bool replace_on_access) {
   i::DirectHandle<i::AccessorInfo> obj =
       i_isolate->factory()->NewAccessorInfo();
@@ -1590,7 +1590,7 @@ void Template::SetNativeDataProperty(v8::Local<Name> name,
 
 void Template::SetLazyDataProperty(v8::Local<Name> name,
                                    AccessorNameGetterCallback getter,
-                                   v8::Local<Value> data,
+                                   v8::Local<Data> data,
                                    PropertyAttribute attribute,
                                    SideEffectType getter_side_effect_type,
                                    SideEffectType setter_side_effect_type) {
@@ -3542,6 +3542,10 @@ bool StackFrame::IsUserJavaScript() const {
   return Utils::OpenDirectHandle(this)->script()->IsUserJavaScript();
 }
 
+bool StackFrame::IsScriptOpaque() const {
+  return Utils::OpenDirectHandle(this)->script()->origin_options().IsOpaque();
+}
+
 // --- J S O N ---
 
 MaybeLocal<Value> JSON::Parse(Local<Context> context, Local<String> json_string,
@@ -4359,6 +4363,10 @@ void* v8::BackingStore::Data() const {
 
 size_t v8::BackingStore::ByteLength() const {
   return reinterpret_cast<const i::BackingStore*>(this)->byte_length();
+}
+
+std::span<uint8_t> v8::BackingStore::ByteSpan() const {
+  return {static_cast<uint8_t*>(Data()), ByteLength()};
 }
 
 size_t v8::BackingStore::MaxByteLength() const {
@@ -9368,6 +9376,14 @@ VirtualAddressSpace* v8::IsolateGroup::GetSandboxAddressSpace() {
                   "The sandbox must be initialized first");
   return sandbox->address_space();
 }
+
+void v8::IsolateGroup::SetInSandboxAllocator(
+    std::shared_ptr<Allocator> allocator) {
+  Utils::ApiCheck(isolate_group_->GetIsolateCount() == 0,
+                  "v8::IsolateGroup::SetInSandboxAllocator",
+                  "The allocator must be set before creating an Isolate");
+  isolate_group_->sandbox()->set_in_sandbox_allocator(std::move(allocator));
+}
 #endif
 
 std::unique_ptr<v8::BackingStore> v8::ArrayBuffer::NewBackingStore(
@@ -10497,15 +10513,15 @@ i::ValueHelper::InternalRepresentationType Isolate::GetDataFromSnapshotOnce(
   return GetSerializedDataFromFixedArray(i_isolate, list, index);
 }
 
-Local<Data> Isolate::GetContinuationPreservedEmbedderData() {
-  return GetContinuationPreservedEmbedderDataV2();
-}
-
-void Isolate::SetContinuationPreservedEmbedderData(Local<Data> data) {
-  SetContinuationPreservedEmbedderDataV2(data);
-}
-
 Local<Data> Isolate::GetContinuationPreservedEmbedderDataV2() {
+  return GetContinuationPreservedEmbedderData();
+}
+
+void Isolate::SetContinuationPreservedEmbedderDataV2(Local<Data> data) {
+  SetContinuationPreservedEmbedderData(data);
+}
+
+Local<Data> Isolate::GetContinuationPreservedEmbedderData() {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
 #ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
   return ToApiHandle<Data>(i::direct_handle(
@@ -10516,7 +10532,7 @@ Local<Data> Isolate::GetContinuationPreservedEmbedderDataV2() {
 #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 }
 
-void Isolate::SetContinuationPreservedEmbedderDataV2(Local<Data> data) {
+void Isolate::SetContinuationPreservedEmbedderData(Local<Data> data) {
 #ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
   if (data.IsEmpty()) {
@@ -11040,6 +11056,9 @@ CALLBACK_SETTER(FatalErrorHandler, FatalErrorCallback, exception_behavior)
 CALLBACK_SETTER(ModifyCodeGenerationFromStringsCallback,
                 ModifyCodeGenerationFromStringsCallback2,
                 modify_code_gen_callback)
+CALLBACK_SETTER(DynamicScriptCompiledFromEmbedderCallback,
+                DynamicScriptCompiledFromEmbedderCallback,
+                dynamic_script_callback)
 CALLBACK_SETTER(AllowWasmCodeGenerationCallback,
                 AllowWasmCodeGenerationCallback, allow_wasm_code_gen_callback)
 
@@ -11067,6 +11086,9 @@ CALLBACK_SETTER(SharedArrayBufferConstructorEnabledCallback,
 CALLBACK_SETTER(IsJSApiWrapperNativeErrorCallback,
                 IsJSApiWrapperNativeErrorCallback,
                 is_js_api_wrapper_native_error_callback)
+
+CALLBACK_SETTER(ArrayBufferDetachCallback, ArrayBufferDetachCallback,
+                array_buffer_detach_callback)
 
 void Isolate::InstallConditionalFeatures(Local<Context> context) {
   v8::HandleScope handle_scope(this);
@@ -12116,6 +12138,17 @@ void HeapProfiler::StopSamplingHeapProfiler() {
   reinterpret_cast<i::HeapProfiler*>(this)->StopSamplingHeapProfiler();
 }
 
+void HeapProfiler::SetSamplingHeapProfilerInterval(uint64_t sample_interval) {
+  reinterpret_cast<i::HeapProfiler*>(this)->SetSamplingHeapProfilerInterval(
+      sample_interval);
+}
+
+std::vector<AllocationProfile::Sample>
+HeapProfiler::GetSamplingHeapProfilerSamples() {
+  return reinterpret_cast<i::HeapProfiler*>(this)
+      ->GetSamplingHeapProfilerSamples();
+}
+
 AllocationProfile* HeapProfiler::GetAllocationProfile() {
   return reinterpret_cast<i::HeapProfiler*>(this)->GetAllocationProfile();
 }
@@ -12204,28 +12237,40 @@ const CTypeInfo& CFunctionInfo::ArgumentInfo(unsigned int index) const {
 }
 
 namespace api_internal {
-V8_EXPORT v8::Local<v8::Value> GetFunctionTemplateData(
-    v8::Isolate* isolate, v8::Local<v8::Data> raw_target) {
+namespace {
+i::DirectHandle<i::Object> GetFunctionTemplateDataImpl(
+    v8::Isolate* isolate, v8::Local<v8::Data> raw_target,
+    const char* location) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   i::DirectHandle<i::Object> target = Utils::OpenDirectHandle(*raw_target);
   if (i::IsFunctionTemplateInfo(*target)) {
-    i::DirectHandle<i::Object> data(
+    return i::DirectHandle<i::Object>(
         i::Cast<i::FunctionTemplateInfo>(*target)->callback_data(kAcquireLoad),
         i_isolate);
-    return Utils::ToLocal(data);
-
-  } else if (i::IsJSFunction(*target)) {
+  }
+  if (i::IsJSFunction(*target)) {
     i::DirectHandle<i::JSFunction> target_func = i::Cast<i::JSFunction>(target);
     auto shared = target_func->shared();
     if (shared->IsApiFunction()) {
-      i::DirectHandle<i::Object> data(
+      return i::DirectHandle<i::Object>(
           shared->api_func_data()->callback_data(kAcquireLoad), i_isolate);
-      return Utils::ToLocal(data);
     }
   }
-  Utils::ApiCheck(false, "api_internal::GetFunctionTemplateData",
-                  "Target function is not an Api function");
+  Utils::ApiCheck(false, location, "Target function is not an Api function");
   UNREACHABLE();
+}
+}  // namespace
+
+V8_EXPORT v8::Local<v8::Value> GetFunctionTemplateData(
+    v8::Isolate* isolate, v8::Local<v8::Data> raw_target) {
+  return Utils::ToLocal(GetFunctionTemplateDataImpl(
+      isolate, raw_target, "api_internal::GetFunctionTemplateData"));
+}
+
+V8_EXPORT v8::Local<v8::Data> GetFunctionTemplateDataV2(
+    v8::Isolate* isolate, v8::Local<v8::Data> raw_target) {
+  return ToApiHandle<Data>(GetFunctionTemplateDataImpl(
+      isolate, raw_target, "api_internal::GetFunctionTemplateDataV2"));
 }
 }  // namespace api_internal
 
@@ -12288,7 +12333,7 @@ void WasmStreaming::SetUrl(const char* url, size_t length) { UNREACHABLE(); }
 
 // static
 std::shared_ptr<WasmStreaming> WasmStreaming::Unpack(Isolate* v8_isolate,
-                                                     Local<Value> value) {
+                                                     Local<Data> data) {
   FATAL("WebAssembly is disabled");
 }
 #endif  // !V8_ENABLE_WEBASSEMBLY
@@ -12518,7 +12563,7 @@ bool ValidateFunctionCallbackInfo(const FunctionCallbackInfo<T>& info) {
   CHECK_EQ(i_isolate, Isolate::Current());
   CHECK(!i_isolate->GetIncumbentContext().is_null());
   CHECK(info.This()->IsObject());
-  CHECK(!info.Data().IsEmpty());
+  CHECK(!info.DataV2().IsEmpty());
   CHECK(info.GetReturnValue().Get()->IsValue());
   return true;
 }
@@ -12535,7 +12580,7 @@ bool ValidatePropertyCallbackInfo(const PropertyCallbackInfo<T>& info) {
         *i::PropertyCallbackArguments::GetPropertyName(info);
     CHECK(i::IsName(name));
   }
-  CHECK(info.Data()->IsValue());
+  CHECK(info.DataV2()->IsValue());
   USE(info.ShouldThrowOnError());
   if (!std::is_same_v<T, void>) {
     CHECK(info.GetReturnValue().Get()->IsValue());

@@ -42,7 +42,7 @@ enum IndirectPointerTag : uint16_t {
 
   // Shared trusted pointers are owned by the shared Isolate and stored in the
   // shared trusted pointer table associated with that Isolate.
-  kFirstSharedTrustedPointerTag = 1,
+  kFirstSharedTrustedPointerTag,
   kSharedWasmTrustedInstanceDataIndirectPointerTag =
       kFirstSharedTrustedPointerTag,
   kSharedWasmDispatchTableIndirectPointerTag,
@@ -50,23 +50,27 @@ enum IndirectPointerTag : uint16_t {
 
   // Trusted pointers using these tags are kept in a per-Isolate trusted
   // pointer table and can only be accessed when this Isolate is active.
-  kFirstPerIsolateTrustedPointerTag = kLastSharedTrustedPointerTag + 1,
+  kFirstPerIsolateTrustedPointerTag,
   kWasmInternalFunctionIndirectPointerTag = kFirstPerIsolateTrustedPointerTag,
   // Untagging performance matters for this tag, so it should be "fast".
-  kWasmTrustedInstanceDataIndirectPointerTag = 4,
+  kWasmTrustedInstanceDataIndirectPointerTag,  // 4
   kWasmDispatchTableIndirectPointerTag,
   kWasmSuspenderIndirectPointerTag,
-  kWasmExportedFunctionDataIndirectPointerTag,
-  kWasmCapiFunctionDataIndirectPointerTag,
   kRegExpDataIndirectPointerTag,
+
+  kFirstSFITrustedDataTag,
+  // Untagging performance matters for this tag, so it should be "fast".
+  kWasmExportedFunctionDataIndirectPointerTag = kFirstSFITrustedDataTag,  // 8
+  kWasmCapiFunctionDataIndirectPointerTag,
   kInterpreterDataIndirectPointerTag,
   kUncompiledDataIndirectPointerTag,
-  kDebugInfoIndirectPointerTag,
   kBytecodeArrayIndirectPointerTag,
   // All code pointers share the same tag (pointing to Code objects). Their
   // instruction stream start is guarded by another tag (CodeEntrypointTag).
   kCodeIndirectPointerTag,
-  kLastPerIsolateTrustedPointerTag = kCodeIndirectPointerTag,
+  kLastSFITrustedDataTag = kCodeIndirectPointerTag,
+  kDebugInfoIndirectPointerTag,
+  kLastPerIsolateTrustedPointerTag = kDebugInfoIndirectPointerTag,
 
   // The maximum tag in kAllIndirectPointerTags. Padded to a (pow2-1) to enable
   // fast, single-instruction bitwise untagging (see
@@ -174,6 +178,9 @@ constexpr IndirectPointerTagRange kWasmFunctionDataIndirectPointerTagRange(
     kWasmExportedFunctionDataIndirectPointerTag,
     kWasmCapiFunctionDataIndirectPointerTag);
 
+constexpr IndirectPointerTagRange kSFITrustedDataIndirectPointerRange(
+    kFirstSFITrustedDataTag, kLastSFITrustedDataTag);
+
 // The kAllIndirectPointerTags contains all regular tags including the code tag.
 static_assert(kAllIndirectPointerTags.Contains(kAllSharedIndirectPointerTags));
 static_assert(
@@ -194,9 +201,12 @@ static_assert(kAllIndirectPointerTagsIncludingUnpublished.Contains(
     kAllIndirectPointerTags));
 
 // We expect certain tags to be "fast" as their untagging performance matters.
-// See crbug.com/476810009 for why this tag should be fast.
+// See crbug.com/476810009 and crbug.com/562056770 for why these tags should be
+// fast.
 static_assert(
     IsFastIndirectPointerTag(kWasmTrustedInstanceDataIndirectPointerTag));
+static_assert(
+    IsFastIndirectPointerTag(kWasmExportedFunctionDataIndirectPointerTag));
 
 V8_INLINE static constexpr bool IsSharedTrustedPointerType(
     IndirectPointerTag tag) {

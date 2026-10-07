@@ -23,6 +23,8 @@ V8_OBJECT class Struct : public HeapObject {
   V8_IT_ABSTRACT;
 
  public:
+  inline explicit Struct(Tagged<ReadOnly<Map>> map);
+
   void BriefPrintDetails(std::ostream& os);
 
   using BodyDescriptor = StructBodyDescriptor;

@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <bit>
 #include <limits>
 #include <ostream>
 
@@ -376,6 +377,12 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 #define V8_EXPERIMENTAL_TQ_TO_TSA_BOOL true
 #else
 #define V8_EXPERIMENTAL_TQ_TO_TSA_BOOL false
+#endif
+
+#ifdef V8_X64_16BYTE_STACK_ALIGNMENT
+#define V8_X64_16BYTE_STACK_ALIGNMENT_BOOL true
+#else
+#define V8_X64_16BYTE_STACK_ALIGNMENT_BOOL false
 #endif
 
 #ifdef V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
@@ -1341,6 +1348,9 @@ using MaybeWeak = Union<T, Weak<T>>;
 // Zero is a special Smi value.
 // TODO(leszeks): Add a proper Zero type.
 using Zero = Smi;
+
+// NaN is a special HeapNumber value.
+using NaN = HeapNumber;
 
 // Number is either a Smi or a HeapNumber.
 using Number = Union<Smi, HeapNumber>;
@@ -2542,7 +2552,7 @@ class BinaryOperationFeedback : public AllStatic {
       static_cast<uint32_t>(TypeIndex::kLastTypeIndex) + 1;
   // round up to 2^x for better memory access
   static constexpr uint32_t kTransitionMapStride =
-      base::bits::RoundUpToPowerOfTwo32(kNumTypeIndices);
+      std::bit_ceil(kNumTypeIndices);
 
   static constexpr Type DecodeTypeIndex(TypeIndex index) {
     switch (index) {
@@ -2566,6 +2576,14 @@ class BinaryOperationFeedback : public AllStatic {
     return "Unknown";
   }
 
+  static constexpr TypeIndex CombineTypeIndex(TypeIndex a, TypeIndex b) {
+    Type type_a = DecodeTypeIndex(a);
+    Type type_b = DecodeTypeIndex(b);
+    uint32_t combined_feedback_value =
+        static_cast<uint32_t>(type_a) | static_cast<uint32_t>(type_b);
+    return CalculateTypeIndex(combined_feedback_value);
+  }
+
  private:
   static constexpr TypeIndex CalculateTypeIndex(uint32_t feedback_value) {
 #define CALCULATE_TYPE_INDEX(name)                               \
@@ -2576,14 +2594,6 @@ class BinaryOperationFeedback : public AllStatic {
     BINARY_OPERATION_FEEDBACK_TYPES(CALCULATE_TYPE_INDEX)
 #undef CALCULATE_TYPE_INDEX
     return TypeIndex::kAny;
-  }
-
-  static constexpr TypeIndex CombineTypeIndex(TypeIndex a, TypeIndex b) {
-    Type type_a = DecodeTypeIndex(a);
-    Type type_b = DecodeTypeIndex(b);
-    uint32_t combined_feedback_value =
-        static_cast<uint32_t>(type_a) | static_cast<uint32_t>(type_b);
-    return CalculateTypeIndex(combined_feedback_value);
   }
 
   struct TransitionMap {
@@ -2721,7 +2731,15 @@ class CompareOperationFeedback : public AllStatic {
       static_cast<uint32_t>(TypeIndex::kLastTypeIndex) + 1;
   // round up to 2^x for better memory access
   static constexpr uint32_t kTransitionMapStride =
-      base::bits::RoundUpToPowerOfTwo32(kNumTypeIndices);
+      std::bit_ceil(kNumTypeIndices);
+
+  static constexpr TypeIndex CombineTypeIndex(TypeIndex a, TypeIndex b) {
+    Type type_a = DecodeTypeIndex(a);
+    Type type_b = DecodeTypeIndex(b);
+    uint32_t combined_feedback_value =
+        static_cast<uint32_t>(type_a) | static_cast<uint32_t>(type_b);
+    return CalculateTypeIndex(combined_feedback_value);
+  }
 
  private:
   static constexpr TypeIndex CalculateTypeIndex(uint32_t feedback_value) {
@@ -2733,14 +2751,6 @@ class CompareOperationFeedback : public AllStatic {
     COMPARE_OPERATION_FEEDBACK_TYPES(CALCULATE_TYPE_INDEX)
 #undef CALCULATE_TYPE_INDEX
     return TypeIndex::kAny;
-  }
-
-  static constexpr TypeIndex CombineTypeIndex(TypeIndex a, TypeIndex b) {
-    Type type_a = DecodeTypeIndex(a);
-    Type type_b = DecodeTypeIndex(b);
-    uint32_t combined_feedback_value =
-        static_cast<uint32_t>(type_a) | static_cast<uint32_t>(type_b);
-    return CalculateTypeIndex(combined_feedback_value);
   }
 
   struct TransitionMap {

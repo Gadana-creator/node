@@ -95,12 +95,13 @@ void MigrateExternalStringResource(Isolate* isolate,
   if (to_resource_address == kNullAddress) {
     Tagged<StringClass> cast_from = Cast<StringClass>(from);
     // |to| is a just-created internalized copy of |from|. Migrate the resource.
-    to->SetResource(isolate, cast_from->resource());
+    const typename StringClass::Resource* resource =
+        cast_from->ExchangeResource(isolate, nullptr);
+    to->SetResource(isolate, resource);
     // Zap |from|'s resource pointer to reflect the fact that |from| has
     // relinquished ownership of its resource.
     isolate->heap()->UpdateExternalString(
         from, Cast<ExternalString>(from)->ExternalPayloadSize(), 0);
-    cast_from->SetResource(isolate, nullptr);
   } else if (to_resource_address != from->resource_as_address(isolate)) {
     // |to| already existed and has its own resource. Finalize |from|.
     isolate->heap()->FinalizeExternalString(from);
@@ -2425,8 +2426,8 @@ using RepresentationBits =
     base::BitField<StringRepresentationTag, 0, 3, uint16_t>;
 using IsOneByteBit = base::BitField<bool, 3, 1, uint16_t>;
 using IsUncachedBit = base::BitField<bool, 4, 1, uint16_t>;
-using IsNotInternalizedBit = base::BitField<bool, 5, 1, uint16_t>;
-using IsSharedBit = base::BitField<bool, 6, 1, uint16_t>;
+using IsSharedBit = base::BitField<bool, 5, 1, uint16_t>;
+using IsNotInternalizedBit = base::BitField<bool, 6, 1, uint16_t>;
 
 static_assert(kStringRepresentationMask == RepresentationBits::kMask);
 
@@ -2440,6 +2441,9 @@ static_assert(kUncachedExternalStringTag == IsUncachedBit::encode(true));
 static_assert(kIsNotInternalizedMask == IsNotInternalizedBit::kMask);
 static_assert(kNotInternalizedTag == IsNotInternalizedBit::encode(true));
 static_assert(kInternalizedTag == IsNotInternalizedBit::encode(false));
+
+static_assert(kSharedStringMask == IsSharedBit::kMask);
+static_assert(kSharedStringTag == IsSharedBit::encode(true));
 }  // namespace
 
 }  // namespace internal

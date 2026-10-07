@@ -697,6 +697,8 @@ class DebugWasmScopeIterator final : public debug::ScopeIterator {
 
   ScopeType GetType() override { return type_; }
 
+  VariableInfo GetVariableInfo() override { return VariableInfo::kAvailable; }
+
   v8::Local<v8::Object> GetObject() override {
     Isolate* isolate = frame_->isolate();
     switch (type_) {
@@ -795,6 +797,8 @@ class DebugWasmInterpreterScopeIterator final : public debug::ScopeIterator {
   }
 
   ScopeType GetType() override { return type_; }
+
+  VariableInfo GetVariableInfo() override { return VariableInfo::kAvailable; }
 
   v8::Local<v8::Object> GetObject() override {
     Isolate* isolate = frame_->isolate();
@@ -1048,6 +1052,12 @@ DirectHandle<WasmValueObject> WasmValueObject::New(
     case wasm::kRefNull:
     case wasm::kRef: {
       DirectHandle<Object> ref = value.to_ref();
+#ifdef V8_IS_TSAN
+      if (IsHeapObject(*ref) &&
+          HeapLayout::InWritableSharedSpace(Cast<HeapObject>(*ref))) {
+        TSAN_ACQUIRE(Cast<HeapObject>(*ref).address());
+      }
+#endif
       if (value.type().is_reference_to(wasm::GenericKind::kExn)) {
         t = isolate->factory()->InternalizeString(
             base::StaticCharVector("exnref"));

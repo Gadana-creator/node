@@ -9,6 +9,7 @@
 #include "src/base/bounds.h"
 #include "src/base/iterator.h"
 #include "src/codegen/assembler-inl.h"
+#include "src/codegen/compiler.h"
 #include "src/codegen/macro-assembler-inl.h"
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/compiler/backend/code-generator-impl.h"
@@ -19,6 +20,7 @@
 #include "src/diagnostics/eh-frame.h"
 #include "src/execution/frames.h"
 #include "src/flags/flags.h"
+#include "src/handles/global-handles-inl.h"
 #include "src/logging/counters.h"
 #include "src/logging/log.h"
 #include "src/objects/code-kind.h"
@@ -336,6 +338,7 @@ void CodeGenerator::AssembleCode() {
 #endif
 
     if (block->must_construct_frame()) {
+      DCHECK(frame_access_state()->has_frame());
       AssembleConstructFrame();
       // We need to setup the root register after we assemble the prologue, to
       // avoid clobbering callee saved registers in case of C linkage and
@@ -514,7 +517,18 @@ base::OwnedVector<uint8_t> CodeGenerator::GetTrappingInstructionsData() {
 #endif  // V8_ENABLE_WEBASSEMBLY
 }
 
-MaybeHandle<Code> CodeGenerator::FinalizeCode() {
+void CodeGenerator::PrepareCodeOnBackground(LocalIsolate* local_isolate) {
+  LocalHandleScope handle_scope(local_isolate);
+  AllowHandleDereference allow_deref;
+  Handle<Code> code;
+  if (BuildCodeObject(local_isolate).ToHandle(&code)) {
+    code_ = local_isolate->heap()->NewPersistentHandle(code);
+    retained_maps_ = OptimizedCompilationJob::CollectRetainedMaps(
+        code, info_->DetachCanonicalHandles());
+  }
+}
+
+MaybeHandle<Code> CodeGenerator::BuildCodeObject(LocalIsolate* local_isolate) {
   if (result_ != kSuccess) {
     masm()->AbortedCodeGeneration();
     return {};
@@ -522,12 +536,11 @@ MaybeHandle<Code> CodeGenerator::FinalizeCode() {
 
   // Allocate the source position table.
   Handle<TrustedByteArray> source_positions =
-      source_position_table_builder_.ToSourcePositionTable(isolate());
+      source_position_table_builder_.ToSourcePositionTable(local_isolate);
 
   // Allocate and install the code.
   CodeDesc desc;
-  masm()->GetCode(isolate()->main_thread_local_isolate(), &desc, safepoints(),
-                  handler_table_offset_);
+  masm()->GetCode(local_isolate, &desc, safepoints(), handler_table_offset_);
 
 #if defined(V8_OS_WIN64)
   if (Builtins::IsBuiltinId(info_->builtin())) {
@@ -539,7 +552,7 @@ MaybeHandle<Code> CodeGenerator::FinalizeCode() {
     unwinding_info_writer_.eh_frame_writer()->GetEhFrame(&desc);
   }
 
-  Factory::CodeBuilder builder(isolate(), desc, info()->code_kind());
+  Factory::CodeBuilder builder(local_isolate, desc, info()->code_kind());
   builder.set_builtin(info()->builtin())
       .set_inlined_bytecode_size(info()->inlined_bytecode_size())
       .set_parameter_count(parameter_count_)
@@ -554,7 +567,7 @@ MaybeHandle<Code> CodeGenerator::FinalizeCode() {
   }
 
   if (CodeKindUsesDeoptimizationData(info()->code_kind())) {
-    builder.set_deoptimization_data(GenerateDeoptimizationData());
+    builder.set_deoptimization_data(GenerateDeoptimizationData(local_isolate));
     DCHECK(info()->has_bytecode_array() ||
            info()->code_kind() == CodeKind::WASM_FUNCTION);
   }
@@ -567,9 +580,24 @@ MaybeHandle<Code> CodeGenerator::FinalizeCode() {
     return {};
   }
 
-  LOG_CODE_EVENT(isolate(), CodeLinePosInfoRecordEvent(
-                                code->instruction_start(), *source_positions,
-                                JitCodeEvent::JIT_CODE));
+  return code;
+}
+
+MaybeHandle<Code> CodeGenerator::FinalizeCode() {
+  Handle<Code> code;
+  if (code_.ToHandle(&code)) {
+    code = handle(*code, isolate());
+  } else if (!BuildCodeObject(isolate()->main_thread_local_isolate())
+                  .ToHandle(&code)) {
+    return {};
+  }
+
+  if (code->has_source_position_table()) {
+    LOG_CODE_EVENT(isolate(),
+                   CodeLinePosInfoRecordEvent(code->instruction_start(),
+                                              code->source_position_table(),
+                                              JitCodeEvent::JIT_CODE));
+  }
 
   return code;
 }
@@ -600,6 +628,10 @@ void CodeGenerator::RecordSafepoint(ReferenceMap* references, int pc_offset) {
       safepoint.DefineTaggedStackSlot(index);
     }
   }
+}
+
+void CodeGenerator::RecordSafepointWithoutTaggedSlots() {
+  safepoints()->DefineSafepoint(masm());
 }
 
 bool CodeGenerator::IsMaterializableFromRoot(Handle<HeapObject> object,
@@ -961,9 +993,8 @@ bool CodeGenerator::GetSlotAboveSPBeforeTailCall(Instruction* instr,
     InstructionOperandConverter g(this, instr);
     *slot = g.InputInt32(instr->InputCount() - 1);
     return true;
-  } else {
-    return false;
   }
+  return false;
 }
 
 StubCallMode CodeGenerator::DetermineStubCallMode() const {
@@ -993,13 +1024,14 @@ void CodeGenerator::AssembleGaps(Instruction* instr) {
 namespace {
 
 DirectHandle<TrustedPodArray<InliningPosition>> CreateInliningPositions(
-    OptimizedCompilationInfo* info, Isolate* isolate) {
+    OptimizedCompilationInfo* info, LocalIsolate* local_isolate) {
   const OptimizedCompilationInfo::InlinedFunctionList& inlined_functions =
       info->inlined_functions();
   const uint32_t inlined_functions_len =
       static_cast<uint32_t>(inlined_functions.size());
   DirectHandle<TrustedPodArray<InliningPosition>> inl_positions =
-      TrustedPodArray<InliningPosition>::New(isolate, inlined_functions_len);
+      TrustedPodArray<InliningPosition>::New(local_isolate,
+                                             inlined_functions_len);
   for (uint32_t i = 0; i < inlined_functions_len; ++i) {
     inl_positions->set(i, inlined_functions[i].position);
   }
@@ -1008,18 +1040,18 @@ DirectHandle<TrustedPodArray<InliningPosition>> CreateInliningPositions(
 
 }  // namespace
 
-Handle<DeoptimizationData> CodeGenerator::GenerateDeoptimizationData() {
+Handle<DeoptimizationData> CodeGenerator::GenerateDeoptimizationData(
+    LocalIsolate* local_isolate) {
   OptimizedCompilationInfo* info = this->info();
   int deopt_count = static_cast<int>(deoptimization_exits_.size());
   if (deopt_count == 0 && !info->is_osr()) {
-    return DeoptimizationData::Empty(isolate());
+    return DeoptimizationData::Empty(local_isolate);
   }
   Handle<DeoptimizationData> data =
-      DeoptimizationData::New(isolate(), deopt_count);
+      DeoptimizationData::New(local_isolate, deopt_count);
 
   DirectHandle<DeoptimizationFrameTranslation> translation_array =
-      translations_.ToFrameTranslation(
-          isolate()->main_thread_local_isolate()->factory());
+      translations_.ToFrameTranslation(local_isolate->factory());
 
   data->SetFrameTranslation(*translation_array);
   data->SetInlinedFunctionCount(
@@ -1032,7 +1064,8 @@ Handle<DeoptimizationData> CodeGenerator::GenerateDeoptimizationData() {
 
   if (info->has_shared_info()) {
     DirectHandle<SharedFunctionInfoWrapper> sfi_wrapper =
-        isolate()->factory()->NewSharedFunctionInfoWrapper(info->shared_info());
+        local_isolate->factory()->NewSharedFunctionInfoWrapper(
+            info->shared_info());
     data->SetWrappedSharedFunctionInfo(*sfi_wrapper);
   } else {
     data->SetWrappedSharedFunctionInfo(Smi::zero());
@@ -1041,7 +1074,7 @@ Handle<DeoptimizationData> CodeGenerator::GenerateDeoptimizationData() {
   const uint32_t protected_deopt_literals_len =
       static_cast<uint32_t>(protected_deoptimization_literals_.size());
   DirectHandle<ProtectedDeoptimizationLiteralArray> protected_literals =
-      isolate()->factory()->NewProtectedFixedArray(
+      local_isolate->factory()->NewProtectedFixedArray(
           protected_deopt_literals_len);
   for (uint32_t i = 0; i < protected_deopt_literals_len; i++) {
     IndirectHandle<TrustedObject> object =
@@ -1054,16 +1087,18 @@ Handle<DeoptimizationData> CodeGenerator::GenerateDeoptimizationData() {
   const uint32_t deopt_literals_len =
       static_cast<uint32_t>(deoptimization_literals_.size());
   DirectHandle<DeoptimizationLiteralArray> literals =
-      isolate()->factory()->NewDeoptimizationLiteralArray(deopt_literals_len);
+      local_isolate->factory()->NewDeoptimizationLiteralArray(
+          deopt_literals_len);
   for (uint32_t i = 0; i < deopt_literals_len; i++) {
-    DirectHandle<Object> object = deoptimization_literals_[i].Reify(isolate());
+    DirectHandle<Object> object =
+        deoptimization_literals_[i].Reify(local_isolate);
     CHECK(!object.is_null());
     literals->set(i, *object);
   }
   data->SetLiteralArray(*literals);
 
   DirectHandle<TrustedPodArray<InliningPosition>> inl_pos =
-      CreateInliningPositions(info, isolate());
+      CreateInliningPositions(info, local_isolate);
   data->SetInliningPositions(*inl_pos);
 
   if (info->is_osr()) {
@@ -1667,19 +1702,12 @@ void CodeGenerator::AddTranslationForOperand(Instruction* instr,
       case Constant::kFloat64:
         DCHECK(type.representation() == MachineRepresentation::kFloat64 ||
                type.representation() == MachineRepresentation::kTagged);
-        if (type == MachineType::HoleyFloat64() &&
-            constant.ToFloat64().AsUint64() == kHoleNanInt64) {
-          literal = DeoptimizationLiteral::HoleNaN();
-#ifdef V8_ENABLE_UNDEFINED_DOUBLE
-        } else if (type == MachineType::HoleyFloat64() &&
-                   constant.ToFloat64().AsUint64() == kUndefinedNanInt64) {
-          literal =
-              DeoptimizationLiteral(isolate()->factory()->undefined_value());
-#endif  // V8_ENABLE_UNDEFINED_DOUBLE
+        if (type == MachineType::HoleyFloat64()) {
+          translations_.StoreHoleyDoubleLiteral(Float64(constant.ToFloat64()));
         } else {
-          literal = DeoptimizationLiteral(constant.ToFloat64().value());
+          translations_.StoreDoubleLiteral(Float64(constant.ToFloat64()));
         }
-        break;
+        return;
       case Constant::kHeapObject:
         DCHECK_EQ(MachineRepresentation::kTagged, type.representation());
         literal = DeoptimizationLiteral(constant.ToHeapObject());

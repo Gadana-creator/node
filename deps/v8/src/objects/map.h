@@ -37,6 +37,7 @@ enum InstanceType : uint16_t;
   V(Filler)                          \
   V(HeapNumber)                      \
   V(HashSeedWrapper)                 \
+  V(UninitializedHeapNumber)         \
   V(Hole)                            \
   V(SeqOneByteString)                \
   V(SeqTwoByteString)                \
@@ -202,10 +203,10 @@ using MapHandlesSpan = std::span<DirectHandle<Map>>;
 //      +----------+-------------------------------------------------+
 //      | Byte     | [bit_field]                                     |
 //      |          |   - is_callable (bit 0)                         |
-//      |          |   - has_named_interceptor (bit 1)               |
-//      |          |   - has_indexed_interceptor (bit 2)             |
-//      |          |   - is_undetectable (bit 3)                     |
-//      |          |   - is_access_check_needed (bit 4)              |
+//      |          |   - is_undetectable (bit 1)                     |
+//      |          |   - has_named_interceptor (bit 2)               |
+//      |          |   - is_access_check_needed (bit 3)              |
+//      |          |   - has_indexed_interceptor (bit 4)             |
 //      |          |   - is_constructor (bit 5)                      |
 //      |          |   - is_extended_map (bit 6)                     |
 //      +----------+-------------------------------------------------+
@@ -337,14 +338,15 @@ V8_OBJECT class Map : public HeapObject {
   // Atomic accessors, used for allowlisting legitimate concurrent accesses.
   DECL_PRIMITIVE_ACCESSORS(relaxed_bit_field, uint8_t)
 
-  // Bit positions for |bit_field|.
+  // Bit positions for |bit_field|. The order must match MapBitFields1 in
+  // map.tq, which explains why the bits tested together are adjacent.
   struct Bits1 {
     using IsCallableBit = base::BitField<bool, 0, 1, uint8_t>;
-    using HasNamedInterceptorBit = IsCallableBit::Next<bool, 1>;
-    using HasIndexedInterceptorBit = HasNamedInterceptorBit::Next<bool, 1>;
-    using IsUndetectableBit = HasIndexedInterceptorBit::Next<bool, 1>;
-    using IsAccessCheckNeededBit = IsUndetectableBit::Next<bool, 1>;
-    using IsConstructorBit = IsAccessCheckNeededBit::Next<bool, 1>;
+    using IsUndetectableBit = IsCallableBit::Next<bool, 1>;
+    using HasNamedInterceptorBit = IsUndetectableBit::Next<bool, 1>;
+    using IsAccessCheckNeededBit = HasNamedInterceptorBit::Next<bool, 1>;
+    using HasIndexedInterceptorBit = IsAccessCheckNeededBit::Next<bool, 1>;
+    using IsConstructorBit = HasIndexedInterceptorBit::Next<bool, 1>;
     using IsExtendedMapBit = IsConstructorBit::Next<bool, 1>;
   };
 
@@ -1185,10 +1187,10 @@ V8_OBJECT class Map : public HeapObject {
   std::atomic<uint8_t> inobject_properties_start_or_constructor_function_index_;
   std::atomic<uint8_t> used_or_unused_instance_size_in_words_;
   std::atomic<uint8_t> visitor_id_;
-  std::atomic<uint16_t> instance_type_;
-  std::atomic<uint8_t> bit_field_;
-  uint8_t bit_field2_;
-  std::atomic<uint32_t> bit_field3_;
+  std::atomic<uint16_t> instance_type_ V8_TQ_TYPE(InstanceType);
+  std::atomic<uint8_t> bit_field_ V8_TQ_TYPE(MapBitFields1);
+  uint8_t bit_field2_ V8_TQ_TYPE(MapBitFields2);
+  std::atomic<uint32_t> bit_field3_ V8_TQ_TYPE(MapBitFields3);
 #if TAGGED_SIZE_8_BYTES
   uint32_t optional_padding_;
 #endif
@@ -1201,8 +1203,8 @@ V8_OBJECT class Map : public HeapObject {
   TaggedMember<DescriptorArray> instance_descriptors_;
   TaggedMember<DependentCode> dependent_code_;
 #endif
-  TaggedMember<UnionOf<Smi, Cell>> prototype_validity_cell_;
-  TaggedMember<UnionOf<Smi, MaybeWeak<Map>, TransitionArray, PrototypeInfo,
+  TaggedMember<UnionOf<Zero, Cell>> prototype_validity_cell_;
+  TaggedMember<UnionOf<Zero, MaybeWeak<Map>, TransitionArray, PrototypeInfo,
                        PrototypeSharedClosureInfo>>
       transitions_or_prototype_info_;
 } V8_OBJECT_END;
@@ -1248,7 +1250,7 @@ V8_ABSTRACT_OBJECT class ExtendedMap : public Map {
   static const int kMinimumSize;
   static const int kStartOfStrongExtendedFieldsOffset;
 
-  std::atomic<uint8_t> bit_field_ex_;
+  std::atomic<uint8_t> bit_field_ex_ V8_TQ_TYPE(ExtendedMapBitFields);
   // Leaves kTaggedSize-1 unused bytes, they will be used by subclasses.
 } V8_OBJECT_END;
 

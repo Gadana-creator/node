@@ -534,6 +534,8 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFS(SetDataProperties, NeedsContext{true}, kTarget, kSource)                 \
   TFS(ProxyGetPropertyFastPath, NeedsContext{true}, kProxy, kName, kReceiver,  \
       kHandler)                                                                \
+  TFC(ProxyGetPropertyTrapResultLazyDeoptContinuation,                         \
+      ProxyGetPropertyTrapResultLazyDeoptContinuation)                         \
   TFC(CopyDataPropertiesWithExcludedPropertiesOnStack,                         \
       CopyDataPropertiesWithExcludedPropertiesOnStack)                         \
   TFC(CopyDataPropertiesWithExcludedProperties,                                \
@@ -1497,9 +1499,10 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   IF_WASM(ASM, WasmCompileLazy, WasmDummy)                                     \
   IF_WASM(ASM, WasmLiftoffFrameSetup, WasmDummy)                               \
   IF_WASM(ASM, WasmDebugBreak, WasmDummy)                                      \
-  IF_WASM(ASM, WasmDebugTrap, WasmDummy)                                       \
+  IF_WASM(ASM, WasmTrapHandlerThrowTrap, WasmDummy)                            \
   IF_WASM(ASM, WasmOnStackReplace, WasmDummy)                                  \
   IF_WASM(ASM, WasmHandleStackOverflow, WasmHandleStackOverflow)               \
+  IF_WASM(ASM, WasmReturnFromSegment, WasmDummy)                               \
   IF_WASM(TFC, WasmFloat32ToNumber, WasmFloat32ToNumber)                       \
   IF_WASM(TFC, WasmFloat64ToNumber, WasmFloat64ToTagged)                       \
   IF_WASM(TFC, WasmFloat64ToString, WasmFloat64ToTagged)                       \

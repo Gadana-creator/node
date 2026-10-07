@@ -442,7 +442,7 @@ class DebugInfoImpl {
     if (!code->is_liftoff()) return false;  // Cannot step in TurboFan code.
     if (IsAtReturn(frame)) return false;    // Will return after this step.
     ReturnLocation return_location = kAfterBreakpoint;
-    // Check if the frame above is a WasmDebugTrap builtin call.
+    // Check if the frame above is a WasmTrapHandlerThrowTrap builtin call.
     StackFrameIterator it(frame->isolate());
     Builtin last_builtin = Builtin::kNoBuiltinId;
     while (!it.done()) {
@@ -452,7 +452,7 @@ class DebugInfoImpl {
                          : Builtin::kNoBuiltinId;
       it.Advance();
     }
-    if (last_builtin == Builtin::kWasmDebugTrap) {
+    if (last_builtin == Builtin::kWasmTrapHandlerThrowTrap) {
       return_location = kAfterWasmCall;
     }
     FloodWithBreakpoints(frame, return_location);
@@ -677,7 +677,7 @@ class DebugInfoImpl {
     }
 
     if (value->is_register()) {
-      if (debug_break_fp == kNullAddress) return {};
+      DCHECK_NE(kNullAddress, debug_break_fp);
       auto reg = LiftoffRegister::from_liftoff_code(value->reg_code);
       auto gp_addr = [debug_break_fp](Register reg) {
         return debug_break_fp +
@@ -693,7 +693,11 @@ class DebugInfoImpl {
       }
       if (reg.is_gp()) {
         if (value->type == kWasmI32) {
-          return WasmValue(ReadUnalignedValue<uint32_t>(gp_addr(reg.gp())));
+          Address addr = gp_addr(reg.gp());
+#if V8_TARGET_BIG_ENDIAN && V8_HOST_ARCH_64_BIT
+          addr += kInt32Size;
+#endif
+          return WasmValue(ReadUnalignedValue<uint32_t>(addr));
         } else if (value->type == kWasmI64) {
           return WasmValue(ReadUnalignedValue<uint64_t>(gp_addr(reg.gp())));
         } else if (value->type.is_ref()) {
@@ -732,6 +736,11 @@ class DebugInfoImpl {
 
     // Otherwise load the value from the stack.
     Address stack_address = stack_frame_base - value->stack_offset;
+#if V8_TARGET_BIG_ENDIAN && V8_HOST_ARCH_64_BIT
+    if (value->type.kind() == kI32 || value->type.kind() == kF32) {
+      stack_address += kInt32Size;
+    }
+#endif
     switch (value->type.kind()) {
       case kI32:
         return WasmValue(ReadUnalignedValue<int32_t>(stack_address));
@@ -772,8 +781,8 @@ class DebugInfoImpl {
       bool at_debug_break = it.frame()->is_wasm_debug_break();
       bool at_trap = false;
       if (at_debug_break) {
-        at_trap =
-            it.frame()->LookupCode()->builtin_id() == Builtin::kWasmDebugTrap;
+        at_trap = it.frame()->LookupCode()->builtin_id() ==
+                  Builtin::kWasmTrapHandlerThrowTrap;
         it.Advance();
         CHECK(!it.done());
       }
@@ -1100,14 +1109,12 @@ bool WasmScript::SetBreakPointForFunction(
 
 namespace {
 
-int GetBreakpointPos(Isolate* isolate,
-                     Tagged<Object> break_point_info_or_undef) {
+int GetBreakpointPos(Tagged<Object> break_point_info_or_undef) {
   if (IsUndefined(break_point_info_or_undef)) return kMaxInt;
   return Cast<BreakPointInfo>(break_point_info_or_undef)->source_position();
 }
 
-int FindBreakpointInfoInsertPos(Isolate* isolate,
-                                DirectHandle<FixedArray> breakpoint_infos,
+int FindBreakpointInfoInsertPos(Tagged<FixedArray> breakpoint_infos,
                                 int position) {
   // Find insert location via binary search, taking care of undefined values on
   // the right. {position} is either {kOnEntryBreakpointPosition} (which is -1),
@@ -1120,15 +1127,45 @@ int FindBreakpointInfoInsertPos(Isolate* isolate,
   while (right - left > 1) {
     int mid = left + (right - left) / 2;
     Tagged<Object> mid_obj = breakpoint_infos->get(mid);
-    if (GetBreakpointPos(isolate, mid_obj) <= position) {
+    if (GetBreakpointPos(mid_obj) <= position) {
       left = mid;
     } else {
       right = mid;
     }
   }
 
-  int left_pos = GetBreakpointPos(isolate, breakpoint_infos->get(left));
+  int left_pos = GetBreakpointPos(breakpoint_infos->get(left));
   return left_pos < position ? left + 1 : left;
+}
+
+bool HasBreakpointAtPosition(Tagged<Script> script, int position) {
+  if (!script->has_wasm_breakpoint_infos()) return false;
+  Tagged<FixedArray> breakpoint_infos = script->wasm_breakpoint_infos();
+  int pos = FindBreakpointInfoInsertPos(breakpoint_infos, position);
+  return pos < static_cast<int>(breakpoint_infos->ulength().value()) &&
+         GetBreakpointPos(breakpoint_infos->get(pos)) == position;
+}
+
+bool AnyOtherScriptHasBreakpointAtPosition(Isolate* isolate,
+                                           Tagged<Script> script,
+                                           wasm::NativeModule* native_module,
+                                           int position) {
+  DirectHandle<WeakArrayList> wasm_scripts =
+      isolate->debug()->wasm_scripts_with_break_points();
+  if (wasm_scripts.is_null()) return false;
+  DisallowGarbageCollection no_gc;
+  const uint32_t wasm_scripts_len = wasm_scripts->length().value();
+  for (uint32_t i = 0; i < wasm_scripts_len; ++i) {
+    Tagged<HeapObject> raw_script;
+    if (!wasm_scripts->Get(i).GetHeapObject(&raw_script)) continue;
+    Tagged<Script> other_script = Cast<Script>(raw_script);
+    if (other_script == script) continue;
+    if (other_script->wasm_native_module().raw() != native_module) continue;
+    if (HasBreakpointAtPosition(other_script, position)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace
@@ -1142,14 +1179,16 @@ bool WasmScript::ClearBreakPoint(DirectHandle<Script> script, int position,
   DirectHandle<FixedArray> breakpoint_infos(script->wasm_breakpoint_infos(),
                                             isolate);
 
-  int int_pos =
-      FindBreakpointInfoInsertPos(isolate, breakpoint_infos, position);
+  int int_pos = FindBreakpointInfoInsertPos(*breakpoint_infos, position);
   DCHECK_GE(int_pos, 0);
   uint32_t pos = static_cast<uint32_t>(int_pos);
   uint32_t breakpoint_infos_len = breakpoint_infos->ulength().value();
 
   // Does a BreakPointInfo object already exist for this position?
-  if (pos == breakpoint_infos_len) return false;
+  if (pos == breakpoint_infos_len ||
+      GetBreakpointPos(breakpoint_infos->get(pos)) != position) {
+    return false;
+  }
 
   DirectHandle<BreakPointInfo> info(
       Cast<BreakPointInfo>(breakpoint_infos->get(pos)), isolate);
@@ -1167,19 +1206,22 @@ bool WasmScript::ClearBreakPoint(DirectHandle<Script> script, int position,
     breakpoint_infos->set(breakpoint_infos_len - 1,
                           ReadOnlyRoots{isolate}.undefined_value(),
                           SKIP_WRITE_BARRIER);
-  }
 
-  if (break_point->id() == v8::internal::Debug::kInstrumentationId) {
-    // Special handling for instrumentation breakpoints.
-    SetBreakOnEntryFlag(*script, false);
-  } else {
-    // Remove the breakpoint from DebugInfo and recompile.
-    CppGCManaged<wasm::NativeModule>::Ptr native_module =
-        script->wasm_native_module();
-    const wasm::WasmModule* module = native_module->module();
-    int func_index = GetContainingWasmFunction(module, position);
-    native_module->GetDebugInfo()->RemoveBreakpoint(func_index, position,
-                                                    isolate);
+    if (break_point->id() == v8::internal::Debug::kInstrumentationId) {
+      // Special handling for instrumentation breakpoints.
+      SetBreakOnEntryFlag(*script, false);
+    } else {
+      CppGCManaged<wasm::NativeModule>::Ptr native_module =
+          script->wasm_native_module();
+      if (!AnyOtherScriptHasBreakpointAtPosition(
+              isolate, *script, native_module.raw(), position)) {
+        // Remove the breakpoint from DebugInfo and recompile.
+        const wasm::WasmModule* module = native_module->module();
+        int func_index = GetContainingWasmFunction(module, position);
+        native_module->GetDebugInfo()->RemoveBreakpoint(func_index, position,
+                                                        isolate);
+      }
+    }
   }
 
   return true;
@@ -1234,17 +1276,16 @@ void WasmScript::AddBreakpointToInfo(DirectHandle<Script> script, int position,
     breakpoint_infos =
         isolate->factory()->NewFixedArray(4, AllocationType::kOld);
     script->set_wasm_breakpoint_infos(*breakpoint_infos);
+    isolate->debug()->RecordWasmScriptWithBreakpoints(script);
   }
 
-  int insert_pos =
-      FindBreakpointInfoInsertPos(isolate, breakpoint_infos, position);
+  int insert_pos = FindBreakpointInfoInsertPos(*breakpoint_infos, position);
   uint32_t breakpoint_infos_len = breakpoint_infos->ulength().value();
 
   // If a BreakPointInfo object already exists for this position, add the new
   // breakpoint object and return.
   if (insert_pos < static_cast<int>(breakpoint_infos_len) &&
-      GetBreakpointPos(isolate, breakpoint_infos->get(insert_pos)) ==
-          position) {
+      GetBreakpointPos(breakpoint_infos->get(insert_pos)) == position) {
     DirectHandle<BreakPointInfo> old_info(
         Cast<BreakPointInfo>(breakpoint_infos->get(insert_pos)), isolate);
     BreakPointInfo::SetBreakPoint(isolate, old_info, break_point);
@@ -1383,8 +1424,7 @@ MaybeDirectHandle<FixedArray> WasmScript::CheckBreakPoints(
 
   DirectHandle<FixedArray> breakpoint_infos(script->wasm_breakpoint_infos(),
                                             isolate);
-  int insert_pos =
-      FindBreakpointInfoInsertPos(isolate, breakpoint_infos, position);
+  int insert_pos = FindBreakpointInfoInsertPos(*breakpoint_infos, position);
   if (insert_pos >= static_cast<int>(breakpoint_infos->ulength().value())) {
     return {};
   }
